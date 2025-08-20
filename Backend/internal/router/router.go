@@ -26,6 +26,8 @@ func Setup(r *gin.Engine, pool *pgxpool.Pool) {
 	// health
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 
-	// first API: create employee
+	// Employee endpoints
 	r.POST("/employees", eh.CreateEmployee)
+	r.GET("/employees/:id/leave-balances", eh.GetLeaveBalances)
+	r.PUT("/employees/:id/leave-balances", eh.UpdateLeaveBalances)
 }
