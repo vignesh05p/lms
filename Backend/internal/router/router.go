@@ -1,7 +1,7 @@
 package router
 
 import (
-	"leave-management/internal/handlers"
+	"leave-managemen/internal/handlers"
 	"leave-management/internal/middleware"
 	"leave-management/internal/models"
 
@@ -51,17 +51,17 @@ func Setup(r *gin.Engine, pool *pgxpool.Pool) {
 		{
 			// Employees can create their own requests
 			leaveRequests.POST("", authMiddleware.RequirePermission("create_own_requests"), lrh.ApplyLeave)
-			
+
 			// Employees can view their own requests, managers can view team requests, HR/Admin can view all
 			leaveRequests.GET("", authMiddleware.RequirePermission("view_own_requests"), lrh.ListLeaveRequests)
-			
+
 			// Employees can view their own request details
 			leaveRequests.GET("/:id", authMiddleware.RequireOwnership("leave_request"), lrh.GetLeaveRequestByID)
-			
+
 			// Managers can approve/reject team requests, HR/Admin can approve/reject any
 			leaveRequests.PUT("/:id/approve", authMiddleware.RequirePermission("approve_team_requests"), lrh.ApproveLeaveRequest)
 			leaveRequests.PUT("/:id/reject", authMiddleware.RequirePermission("reject_team_requests"), lrh.RejectLeaveRequest)
-			
+
 			// Employees can cancel their own requests
 			leaveRequests.PUT("/:id/cancel", authMiddleware.RequireOwnership("leave_request"), lrh.CancelLeaveRequest)
 		}
@@ -86,7 +86,7 @@ func Setup(r *gin.Engine, pool *pgxpool.Pool) {
 			employees.GET("/:id", authMiddleware.RequireOwnership("employee"), eh.GetEmployeeByID)
 			employees.PUT("/:id", authMiddleware.RequireRole(models.RoleHR, models.RoleAdmin), eh.UpdateEmployee)
 			employees.DELETE("/:id", authMiddleware.RequireRole(models.RoleHR, models.RoleAdmin), eh.DeactivateEmployee)
-			
+
 			// Leave Balances
 			employees.GET("/:id/leave-balances", authMiddleware.RequireOwnership("leave_balance"), eh.GetLeaveBalances)
 			employees.PUT("/:id/leave-balances", authMiddleware.RequireRole(models.RoleHR, models.RoleAdmin), eh.UpdateLeaveBalances)

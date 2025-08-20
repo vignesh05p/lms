@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// main func ready here
 func main() {
 	cfg := config.Load()
 	ctx := context.Background()
