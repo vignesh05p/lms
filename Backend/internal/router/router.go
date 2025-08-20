@@ -11,6 +11,7 @@ func Setup(r *gin.Engine, pool *pgxpool.Pool) {
 	eh := handlers.NewEmployeeHandler(pool)
 
 	lh := handlers.NewLeaveTypeHandler(pool)
+	ah := handlers.NewAuditHandler(pool)
 
 	lrh := handlers.NewLeaveRequestHandler(pool)
 
@@ -22,6 +23,11 @@ func Setup(r *gin.Engine, pool *pgxpool.Pool) {
 	r.PUT("/leave-requests/:id/cancel", lrh.CancelLeaveRequest)
 
 	r.GET("/leave-types", lh.GetLeaveTypes)
+	r.POST("/leave-types", lh.CreateLeaveType)
+	r.PUT("/leave-types/:id", lh.UpdateLeaveType)
+	r.DELETE("/leave-types/:id", lh.DeleteLeaveType)
+
+	r.GET("/audit-logs", ah.GetAuditLogs)
 
 	// health
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
