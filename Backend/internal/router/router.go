@@ -15,6 +15,11 @@ func Setup(r *gin.Engine, pool *pgxpool.Pool) {
 	lrh := handlers.NewLeaveRequestHandler(pool)
 
 	r.POST("/leave-requests", lrh.ApplyLeave)
+	r.GET("/leave-requests", lrh.ListLeaveRequests)
+	r.GET("/leave-requests/:id", lrh.GetLeaveRequestByID)
+	r.PUT("/leave-requests/:id/approve", lrh.ApproveLeaveRequest)
+	r.PUT("/leave-requests/:id/reject", lrh.RejectLeaveRequest)
+	r.PUT("/leave-requests/:id/cancel", lrh.CancelLeaveRequest)
 
 	r.GET("/leave-types", lh.GetLeaveTypes)
 

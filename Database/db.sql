@@ -205,6 +205,34 @@ CREATE TRIGGER leave_requests_audit_trigger AFTER INSERT OR UPDATE OR DELETE ON 
 CREATE TRIGGER leave_balances_audit_trigger AFTER INSERT OR UPDATE OR DELETE ON employee_leave_balances
     FOR EACH ROW EXECUTE FUNCTION audit_trigger_function();
 
+-- Utility functions required by backend
+
+-- Calculate working days (Mon-Fri) between two dates inclusive
+CREATE OR REPLACE FUNCTION calculate_working_days(start_date DATE, end_date DATE)
+RETURNS INTEGER AS $$
+    SELECT COUNT(*)::INT
+    FROM generate_series(start_date, end_date, interval '1 day') AS d(day)
+    WHERE EXTRACT(ISODOW FROM d.day) < 6; -- 1..5 are Mon..Fri
+$$ LANGUAGE SQL STABLE;
+
+-- Check overlapping leave requests for an employee, optionally excluding a specific request
+CREATE OR REPLACE FUNCTION check_leave_overlap(
+    p_employee_id UUID,
+    p_start_date DATE,
+    p_end_date DATE,
+    p_exclude_request_id UUID
+)
+RETURNS BOOLEAN AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM leave_requests lr
+        WHERE lr.employee_id = p_employee_id
+          AND lr.status IN ('pending','approved')
+          AND (p_exclude_request_id IS NULL OR lr.id <> p_exclude_request_id)
+          AND NOT (lr.end_date < p_start_date OR lr.start_date > p_end_date)
+    );
+$$ LANGUAGE SQL STABLE;
+
 -- Update updated_at
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
