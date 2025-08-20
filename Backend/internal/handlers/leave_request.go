@@ -2,9 +2,12 @@ package handlers
 
 import (
 	"context"
+	"context"
 	"fmt"
 	"net/http"
 	"time"
+
+	"leave-management/internal/models"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,55 +31,47 @@ type LeaveRequestInput struct {
 
 // POST /leave-requests
 func (h *LeaveRequestHandler) ApplyLeave(c *gin.Context) {
-	var input LeaveRequestInput
+	var input struct {
+		LeaveTypeID string `json:"leave_type_id" binding:"required"`
+		StartDate   string `json:"start_date" binding:"required"`
+		EndDate     string `json:"end_date" binding:"required"`
+		Reason      string `json:"reason" binding:"required"`
+	}
+
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input", "details": err.Error()})
+		return
+	}
+
+	// Get authenticated user's employee ID
+	employeeID, exists := c.Get("employee_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
 		return
 	}
 
 	// Parse dates
-	start, err1 := time.Parse("2006-01-02", input.StartDate)
-	end, err2 := time.Parse("2006-01-02", input.EndDate)
-	if err1 != nil || err2 != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid date format, use YYYY-MM-DD"})
-		return
-	}
-	if end.Before(start) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "end_date must be after or equal to start_date"})
-		return
-	}
-
-	// Calculate working days via DB function
-	var totalDays int
-	err := h.pool.QueryRow(
-		context.Background(),
-		"SELECT calculate_working_days($1::date, $2::date)",
-		start, end,
-	).Scan(&totalDays)
-	if err != nil || totalDays <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid leave duration"})
-		return
-	}
-
-	// Check for overlapping leave requests using DB function
-	var hasOverlap bool
-	err = h.pool.QueryRow(
-		context.Background(),
-		"SELECT check_leave_overlap($1::uuid, $2::date, $3::date, NULL)",
-		input.EmployeeID, start, end,
-	).Scan(&hasOverlap)
+	start, err := time.Parse("2006-01-02", input.StartDate)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check overlap"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid start_date format, use YYYY-MM-DD"})
 		return
 	}
-	if hasOverlap {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "leave request overlaps with an existing request"})
+
+	end, err := time.Parse("2006-01-02", input.EndDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid end_date format, use YYYY-MM-DD"})
+		return
+	}
+
+	// Validate dates
+	if start.After(end) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "start_date cannot be after end_date"})
 		return
 	}
 
 	// Validate employee joining date is not after requested start date
 	var joiningDate time.Time
-	if err := h.pool.QueryRow(context.Background(), "SELECT joining_date FROM employees WHERE id=$1", input.EmployeeID).Scan(&joiningDate); err != nil {
+	if err := h.pool.QueryRow(context.Background(), "SELECT joining_date FROM employees WHERE id=$1", employeeID).Scan(&joiningDate); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid employee_id"})
 		return
 	}
@@ -92,39 +87,53 @@ func (h *LeaveRequestHandler) ApplyLeave(c *gin.Context) {
 		context.Background(),
 		`SELECT available_days FROM employee_leave_balances
 		 WHERE employee_id=$1 AND leave_type_id=$2 AND year=$3`,
-		input.EmployeeID, input.LeaveTypeID, currentYear,
+		employeeID, input.LeaveTypeID, currentYear,
 	).Scan(&availableDays); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no leave balance found for this leave type/year"})
 		return
 	}
+
+	// Calculate total days
+	totalDays := int(end.Sub(start).Hours()/24) + 1
+
 	if totalDays > availableDays {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "insufficient leave balance"})
 		return
 	}
 
-	// Insert leave request
-	var requestID string
-	err = h.pool.QueryRow(
+	// Check for overlapping leave requests
+	var hasOverlap bool
+	if err := h.pool.QueryRow(
 		context.Background(),
-		`INSERT INTO leave_requests (employee_id, leave_type_id, start_date, end_date, total_days, reason, status)
-		 VALUES ($1, $2, $3::date, $4::date, $5, $6, 'pending')
-		 RETURNING id`,
-		input.EmployeeID, input.LeaveTypeID, start, end, totalDays, input.Reason,
-	).Scan(&requestID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create leave request"})
+		"SELECT check_leave_overlap($1, $2, $3, NULL)",
+		employeeID, start, end,
+	).Scan(&hasOverlap); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check leave overlap"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":       "Leave request submitted successfully",
-		"request_id":    requestID,
-		"total_days":    totalDays,
-		"status":        "pending",
-		"employee_id":   input.EmployeeID,
-		"leave_type_id": input.LeaveTypeID,
-		"start_date":    start.Format("2006-01-02"),
-		"end_date":      end.Format("2006-01-02"),
+	if hasOverlap {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "leave request overlaps with an existing request"})
+		return
+	}
+
+	// Insert leave request
+	var requestID string
+	if err := h.pool.QueryRow(
+		context.Background(),
+		`INSERT INTO leave_requests (employee_id, leave_type_id, start_date, end_date, total_days, reason, status, applied_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW(), NOW(), NOW())
+		 RETURNING id`,
+		employeeID, input.LeaveTypeID, start, end, totalDays, input.Reason,
+	).Scan(&requestID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create leave request", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "Leave request created successfully",
+		"request_id": requestID,
+		"total_days": totalDays,
 	})
 }
 
@@ -173,62 +182,135 @@ func (h *LeaveRequestHandler) GetLeaveRequestByID(c *gin.Context) {
 
 // GET /leave-requests (optional filters: employee_id, status)
 func (h *LeaveRequestHandler) ListLeaveRequests(c *gin.Context) {
-    employeeID := c.Query("employee_id")
-    status := c.Query("status")
+	// Get user context from middleware
+	userID, _ := c.Get("user_id")
+	userRole, _ := c.Get("role")
+	employeeID, _ := c.Get("employee_id")
 
-    query := `SELECT id, employee_id, leave_type_id, start_date, end_date, total_days, reason, status, applied_at
-              FROM leave_requests WHERE 1=1`
-    args := []interface{}{}
-    argIdx := 1
-    if employeeID != "" {
-        query += " AND employee_id=" + fmt.Sprintf("$%d", argIdx)
-        args = append(args, employeeID)
-        argIdx++
-    }
-    if status != "" {
-        query += " AND status=" + fmt.Sprintf("$%d", argIdx)
-        args = append(args, status)
-        argIdx++
-    }
-    query += " ORDER BY applied_at DESC"
+	// Build query based on user role
+	var query string
+	var args []interface{}
+	argIdx := 1
 
-    rows, err := h.pool.Query(context.Background(), query, args...)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list leave requests"})
-        return
-    }
-    defer rows.Close()
+	switch userRole.(string) {
+	case models.RoleAdmin, models.RoleHR:
+		// Admin and HR can see all requests
+		query = `SELECT lr.id, lr.employee_id, lr.leave_type_id, lr.start_date, lr.end_date, 
+			lr.total_days, lr.reason, lr.status, lr.applied_at, lr.approved_by, lr.approved_at, 
+			lr.rejection_reason, lr.comments, lr.created_at, lr.updated_at,
+			e.name as employee_name, e.email as employee_email,
+			lt.name as leave_type_name
+			FROM leave_requests lr
+			JOIN employees e ON lr.employee_id = e.id
+			JOIN leave_types lt ON lr.leave_type_id = lt.id
+			WHERE 1=1`
 
-    result := make([]map[string]interface{}, 0)
-    for rows.Next() {
-        var (
-            id string
-            empID string
-            ltID string
-            startDate time.Time
-            endDate time.Time
-            totalDays int
-            reason string
-            statusVal string
-            appliedAt time.Time
-        )
-        if err := rows.Scan(&id, &empID, &ltID, &startDate, &endDate, &totalDays, &reason, &statusVal, &appliedAt); err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "row scan failed"})
-            return
-        }
-        result = append(result, gin.H{
-            "id": id,
-            "employee_id": empID,
-            "leave_type_id": ltID,
-            "start_date": startDate.Format("2006-01-02"),
-            "end_date": endDate.Format("2006-01-02"),
-            "total_days": totalDays,
-            "reason": reason,
-            "status": statusVal,
-            "applied_at": appliedAt,
-        })
-    }
-    c.JSON(http.StatusOK, result)
+	case models.RoleManager:
+		// Managers can see their team's requests
+		query = `SELECT lr.id, lr.employee_id, lr.leave_type_id, lr.start_date, lr.end_date, 
+			lr.total_days, lr.reason, lr.status, lr.applied_at, lr.approved_by, lr.approved_at, 
+			lr.rejection_reason, lr.comments, lr.created_at, lr.updated_at,
+			e.name as employee_name, e.email as employee_email,
+			lt.name as leave_type_name
+			FROM leave_requests lr
+			JOIN employees e ON lr.employee_id = e.id
+			JOIN leave_types lt ON lr.leave_type_id = lt.id
+			WHERE e.manager_id = $` + fmt.Sprint(argIdx)
+		args = append(args, userID)
+		argIdx++
+
+	case models.RoleEmployee:
+		// Employees can only see their own requests
+		query = `SELECT lr.id, lr.employee_id, lr.leave_type_id, lr.start_date, lr.end_date, 
+			lr.total_days, lr.reason, lr.status, lr.applied_at, lr.approved_by, lr.approved_at, 
+			lr.rejection_reason, lr.comments, lr.created_at, lr.updated_at,
+			e.name as employee_name, e.email as employee_email,
+			lt.name as leave_type_name
+			FROM leave_requests lr
+			JOIN employees e ON lr.employee_id = e.id
+			JOIN leave_types lt ON lr.leave_type_id = lt.id
+			WHERE lr.employee_id = $` + fmt.Sprint(argIdx)
+		args = append(args, employeeID)
+		argIdx++
+	}
+
+	// Add filters
+	if status := c.Query("status"); status != "" {
+		query += " AND lr.status = $" + fmt.Sprint(argIdx)
+		args = append(args, status)
+		argIdx++
+	}
+
+	// For Admin/HR, allow filtering by employee_id
+	if userRole.(string) == models.RoleAdmin || userRole.(string) == models.RoleHR {
+		if employeeIDFilter := c.Query("employee_id"); employeeIDFilter != "" {
+			query += " AND lr.employee_id = $" + fmt.Sprint(argIdx)
+			args = append(args, employeeIDFilter)
+			argIdx++
+		}
+	}
+
+	query += " ORDER BY lr.created_at DESC"
+
+	rows, err := h.pool.Query(context.Background(), query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch leave requests", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var requests []map[string]interface{}
+	for rows.Next() {
+		var (
+			id              string
+			empID           string
+			leaveTypeID     string
+			startDate       time.Time
+			endDate         time.Time
+			totalDays       int
+			reason          string
+			status          string
+			appliedAt       time.Time
+			approvedBy      *string
+			approvedAt      *time.Time
+			rejectionReason *string
+			comments        *string
+			createdAt       time.Time
+			updatedAt       time.Time
+			employeeName    string
+			employeeEmail   string
+			leaveTypeName   string
+		)
+
+		if err := rows.Scan(&id, &empID, &leaveTypeID, &startDate, &endDate, &totalDays, &reason, &status, &appliedAt, &approvedBy, &approvedAt, &rejectionReason, &comments, &createdAt, &updatedAt, &employeeName, &employeeEmail, &leaveTypeName); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan leave request", "details": err.Error()})
+			return
+		}
+
+		request := gin.H{
+			"id":              id,
+			"employee_id":     empID,
+			"leave_type_id":   leaveTypeID,
+			"start_date":      startDate.Format("2006-01-02"),
+			"end_date":        endDate.Format("2006-01-02"),
+			"total_days":      totalDays,
+			"reason":          reason,
+			"status":          status,
+			"applied_at":      appliedAt,
+			"approved_by":     approvedBy,
+			"approved_at":     approvedAt,
+			"rejection_reason": rejectionReason,
+			"comments":        comments,
+			"created_at":      createdAt,
+			"updated_at":      updatedAt,
+			"employee_name":   employeeName,
+			"employee_email":  employeeEmail,
+			"leave_type_name": leaveTypeName,
+		}
+		requests = append(requests, request)
+	}
+
+	c.JSON(http.StatusOK, requests)
 }
 
 // PUT /leave-requests/:id/approve

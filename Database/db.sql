@@ -268,3 +268,58 @@ INSERT INTO leave_types (name, description, max_days_per_year, carry_forward_all
 ('Paternity Leave', 'Leave for new fathers', 15, false, 0),
 ('Emergency Leave', 'Urgent personal matters', 5, false, 0),
 ('Compensatory Leave', 'Time off for overtime work', 10, true, 3);
+
+-- Authentication tables
+
+-- Users table for authentication
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    employee_id VARCHAR(20) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(20) NOT NULL CHECK (role IN ('employee', 'manager', 'hr', 'admin')),
+    is_active BOOLEAN DEFAULT true,
+    last_login_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Refresh tokens table for JWT refresh functionality
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    token VARCHAR(255) UNIQUE NOT NULL,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMP NOT NULL,
+    is_revoked BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes for authentication tables
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_employee_id ON users(employee_id);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON refresh_tokens(expires_at);
+
+-- Trigger to update updated_at column for users table
+CREATE OR REPLACE FUNCTION update_users_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION update_users_updated_at_column();
+
+-- Audit trigger for users table
+CREATE TRIGGER audit_users_trigger
+    AFTER INSERT OR UPDATE OR DELETE ON users
+    FOR EACH ROW EXECUTE FUNCTION audit_trigger_function();
+
+-- Audit trigger for refresh_tokens table
+CREATE TRIGGER audit_refresh_tokens_trigger
+    AFTER INSERT OR UPDATE OR DELETE ON refresh_tokens
+    FOR EACH ROW EXECUTE FUNCTION audit_trigger_function();
