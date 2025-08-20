@@ -143,6 +143,191 @@ func parsePgErr(err error) string {
 	return msg
 }
 
+// GET /employees
+// Optional filters: department_id, role, active (true/false)
+func (h *EmployeeHandler) ListEmployees(c *gin.Context) {
+	departmentID := c.Query("department_id")
+	role := c.Query("role")
+	active := c.Query("active")
+
+	query := `SELECT id, employee_id, email, name, department_id, role, is_active, joining_date, phone, address
+	          FROM employees WHERE 1=1`
+	args := []interface{}{}
+	argIdx := 1
+	if departmentID != "" {
+		query += " AND department_id=" + fmt.Sprintf("$%d", argIdx)
+		args = append(args, departmentID)
+		argIdx++
+	}
+	if role != "" {
+		query += " AND role=" + fmt.Sprintf("$%d", argIdx)
+		args = append(args, role)
+		argIdx++
+	}
+	if active != "" {
+		// accept true/false (case-insensitive)
+		val := strings.ToLower(active) == "true"
+		query += " AND is_active=" + fmt.Sprintf("$%d", argIdx)
+		args = append(args, val)
+		argIdx++
+	}
+	query += " ORDER BY created_at DESC"
+
+	rows, err := h.Pool.Query(context.Background(), query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list employees"})
+		return
+	}
+	defer rows.Close()
+
+	result := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var (
+			id string
+			empID string
+			email string
+			name string
+			deptID string
+			roleVal string
+			isActive bool
+			joiningDate time.Time
+			phone *string
+			address *string
+		)
+		if err := rows.Scan(&id, &empID, &email, &name, &deptID, &roleVal, &isActive, &joiningDate, &phone, &address); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "row scan failed"})
+			return
+		}
+		item := gin.H{
+			"id": id,
+			"employee_id": empID,
+			"email": email,
+			"name": name,
+			"department_id": deptID,
+			"role": roleVal,
+			"is_active": isActive,
+			"joining_date": joiningDate.Format("2006-01-02"),
+		}
+		if phone != nil { item["phone"] = *phone }
+		if address != nil { item["address"] = *address }
+		result = append(result, item)
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// GET /employees/:id
+func (h *EmployeeHandler) GetEmployeeByID(c *gin.Context) {
+	id := c.Param("id")
+	var (
+		empID string
+		email string
+		name string
+		deptID string
+		roleVal string
+		isActive bool
+		joiningDate time.Time
+		phone *string
+		address *string
+	)
+	err := h.Pool.QueryRow(context.Background(), `
+		SELECT employee_id, email, name, department_id, role, is_active, joining_date, phone, address
+		FROM employees WHERE id=$1`, id,
+	).Scan(&empID, &email, &name, &deptID, &roleVal, &isActive, &joiningDate, &phone, &address)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "employee not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id": id,
+		"employee_id": empID,
+		"email": email,
+		"name": name,
+		"department_id": deptID,
+		"role": roleVal,
+		"is_active": isActive,
+		"joining_date": joiningDate.Format("2006-01-02"),
+		"phone": phone,
+		"address": address,
+	})
+}
+
+type updateEmployeeDTO struct {
+	Email        *string `json:"email"`
+	Phone        *string `json:"phone"`
+	DepartmentID *string `json:"department_id"`
+	Role         *string `json:"role"`
+}
+
+// PUT /employees/:id
+func (h *EmployeeHandler) UpdateEmployee(c *gin.Context) {
+	id := c.Param("id")
+	var in updateEmployeeDTO
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid input", "details": err.Error()})
+		return
+	}
+
+	updates := []string{}
+	args := []interface{}{}
+	argIdx := 1
+
+	if in.Email != nil {
+		if strings.TrimSpace(*in.Email) == "" { c.JSON(http.StatusBadRequest, gin.H{"error": "email cannot be empty"}); return }
+		updates = append(updates, fmt.Sprintf("email=$%d", argIdx))
+		args = append(args, strings.ToLower(strings.TrimSpace(*in.Email)))
+		argIdx++
+	}
+	if in.Phone != nil {
+		updates = append(updates, fmt.Sprintf("phone=$%d", argIdx))
+		args = append(args, strings.TrimSpace(*in.Phone))
+		argIdx++
+	}
+	if in.DepartmentID != nil {
+		updates = append(updates, fmt.Sprintf("department_id=$%d", argIdx))
+		args = append(args, *in.DepartmentID)
+		argIdx++
+	}
+	if in.Role != nil {
+		updates = append(updates, fmt.Sprintf("role=$%d", argIdx))
+		args = append(args, *in.Role)
+		argIdx++
+	}
+
+	if len(updates) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	query := "UPDATE employees SET " + strings.Join(updates, ", ") + ", updated_at=NOW() WHERE id=$" + fmt.Sprintf("%d", argIdx)
+	args = append(args, id)
+
+	ct, err := h.Pool.Exec(context.Background(), query, args...)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "update failed", "details": parsePgErr(err)})
+		return
+	}
+	if ct.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "employee not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "employee updated"})
+}
+
+// DELETE /employees/:id (soft-delete: set is_active=false)
+func (h *EmployeeHandler) DeactivateEmployee(c *gin.Context) {
+	id := c.Param("id")
+	ct, err := h.Pool.Exec(context.Background(), `UPDATE employees SET is_active=false, updated_at=NOW() WHERE id=$1`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to deactivate employee"})
+		return
+	}
+	if ct.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "employee not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "employee deactivated"})
+}
+
 // GET /employees/:id/leave-balances
 func (h *EmployeeHandler) GetLeaveBalances(c *gin.Context) {
 	employeeID := c.Param("id")

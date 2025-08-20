@@ -28,6 +28,10 @@ func Setup(r *gin.Engine, pool *pgxpool.Pool) {
 
 	// Employee endpoints
 	r.POST("/employees", eh.CreateEmployee)
+	r.GET("/employees", eh.ListEmployees)
+	r.GET("/employees/:id", eh.GetEmployeeByID)
+	r.PUT("/employees/:id", eh.UpdateEmployee)
+	r.DELETE("/employees/:id", eh.DeactivateEmployee)
 	r.GET("/employees/:id/leave-balances", eh.GetLeaveBalances)
 	r.PUT("/employees/:id/leave-balances", eh.UpdateLeaveBalances)
 }
